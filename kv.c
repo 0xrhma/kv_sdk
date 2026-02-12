@@ -2,7 +2,7 @@
 #include <sys/types.h>
 #define KV_BOUNDS_CHECK
 #define KV_UARENA_BOUNDS_CHECK
-#define DEBUG
+// #define DEBUG
 #define KV_REALLOC
 
 #include "kv.h"
@@ -111,6 +111,13 @@ typedef enum {
 } PStates;
 
 typedef struct {
+  ulong nkeys; // no keys
+  ulong mkeys; // strbuf memory required for the keys
+  ulong nvals; // no values
+  ulong mvals; // strbuf memory required for the values
+} KvStat;
+
+typedef struct {
   PStates cstate; // current state
   char *tokens;   // tokens buffer
   ulong ntokens;  // total no of tokens
@@ -118,257 +125,158 @@ typedef struct {
   ulong coffset;  // current token offset
   // upload params
   KvObj *cobj;    // current object
+  KvObj *robj;    // root object
   char* cstrpos; // current string pos in string buffer
-  char** cpstr;  // current string pointer pos in string pointer buffer
+
+  // prepass required for allocation later "first pass"
+  ulong cdepth; // current depth
+  ulong mdepth; // max depth allowed (max depth is calculated beforehand)
+                // check everytime you go down a level
+  ulong ndepth; // next available depth
+  KvStat *depths; // depth array
+  KvStat *cdptr; // current depth ptr
+  ulong nkeys;  // no of keys;
+  ulong nvals; // no of values;
+
+
+  // Post Parse Context
+  uarena* farena;
 } ParseCtx;
 
-int RootParse(ParseCtx *ctx, bool root);
-int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings);
-
-int RootParse(ParseCtx *ctx, bool root) {
-  const char *token;
-  bool accept = false;
-  // warning:: the tokens should only be incremented by 1 one step
-  while ((ctx->ntokens != ctx->cindex) && !accept) {
-    token = ctx->tokens + ctx->coffset;
-    char sym = token[0];
-    token += 1;
-    if (sym != pstr)
-      sym = token[0];
-
-    switch (ctx->cstate) {
-    case Start:
-      switch (sym) {
-      case ' ':
-        break;
-      case '\n':
-        break;
-      case '{':
-        ctx->cstate = KEntry;
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case KEntry:
-      switch (sym) {
-      case '}':
-        ctx->cstate = End;
-        break;
-      case 's':
-        print_dbg("%s : ", token);
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
-
-        ctx->cstate = SeekColon;
-        break;
-      case '\n':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case SeekColon:
-      switch (sym) {
-      case ':':
-        ctx->cstate = VEntry;
-        break;
-      case '\n':
-        break;
-      case ' ':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case VEntry:
-      switch (sym) {
-      case 's':
-        print_dbg("%s\n", token);
-        
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
-
-        ctx->cstate = SeekComma;
-        break;
-      case '[':
-        print_dbg("[");
-        ctx->cstate = LEntry;
-        break;
-      case '{':
-        // consume token and forward
-        print_dbg("\n");
-        ctx->cindex++;
-        ctx->coffset += strlen(token) + 2;
-        ctx->cstate = KEntry; 
-        int status = RootParse(ctx, false);
-        if (!status)
-          return 0;
-        ctx->cstate = SeekComma;
-        goto rp_skip_increments;
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case SeekComma:
-      switch (sym) {
-      case ',':
-        ctx->cstate = KEntry;
-        break;
-      case ' ':
-        break;
-      case '\n':
-        break;
-      case '}':
-        ctx->cstate = End;
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case LEntry:
-      switch (sym) {
-      case 's':
-        print_dbg("%s ", token);
-
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
-        
-        ctx->cstate = LSeekComma;
-        break;
-      case ']':
-        print_dbg("]\n");
-        ctx->cstate = SeekComma;
-        break;
-      case ' ':
-        break;
-      case '\n':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case LSeekComma:
-      switch (sym) {
-      case ',':
-        ctx->cstate = LEntry;
-        break;
-      case ']':
-        print_dbg("]\n");
-        ctx->cstate = SeekComma;
-        break;
-      case '\n':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case End:
-      if (!root){
-        accept = true;
-        goto rp_skip_increments;
-      }
-      else {
-        switch (sym) {
-        case ' ':
-          break;
-        case '\n':
-          break;
-        default:
-          // unexpected entry
-          print("syntax error:: unexpected token \n");
-          return 0;
-          break;
-        }
-      }
-      break;
-    }
-
-    ctx->cindex++; // incr the token index
-    ctx->coffset += strlen(token) + 2; // offset to next token addr
-rp_skip_increments:;
-  }
-  return 1;
+void KvStatInit(KvStat* kvstat) {
+  kvstat->nkeys = 0L;
+  kvstat->mkeys = 0L;
+  kvstat->nvals = 0L;
+  kvstat->mvals = 0L;
 }
 
-int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings) {
+
+int RootParseStats(ParseCtx *ctx, bool root);
+int RootParse(ParseCtx *ctx, bool root);
+KvObj* KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings);
+
+void PrintKv(KvObj* obj);
+
+void PrintKv(KvObj* obj) {
+  print_dbg("\n");
+  for (ulong l=0; l<obj->count; l++) {
+    string ckey = obj->keys[l];
+    KvValue *cval = &obj->values[l];
+    print_dbg("%s : ", ckey);
+    if (cval->obj) 
+      PrintKv(cval->obj);
+    else {
+      for (ulong c=0; c < cval->count; c++) {
+        print_dbg(" %s ", cval->entries[c]);
+      }
+    }
+    print_dbg("\n");
+  }
+  print_dbg("\n");
+
+}
+
+
+KvObj* KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings) {
   ParseCtx ctx;
   ctx.cstate = Start;
   ctx.tokens = tokens;
   ctx.ntokens = ntokens;
   ctx.cindex = 0L;
   ctx.coffset = 0L;
-
-  ulong max_mem_size = mstrings + sizeof(char**)*nstrings + sizeof(KvValue)*nstrings;
   
   // print_dbg(CS_BOLD CS_YELLOW"dub_info::total mem prediction for KvParse:: %lu\n"CS_RESET, max_mem_size);
   
-  char* buffer = malloc(mstrings + sizeof(char**)*nstrings);
-  KvObj res;
-  
-  
-  ctx.cobj = &res; 
+  ctx.mdepth = nstrings;
+  char* buffer = malloc(mstrings + sizeof(KvStat)*ctx.mdepth);
+  assert(buffer);
   ctx.cstrpos = buffer;
-  ctx.cpstr = (char**)(buffer + mstrings);
-  int status = RootParse(&ctx, true);
+  
+  // prepass params
+  ctx.cdepth = 0L;
+  ctx.ndepth = 0L;
+  ctx.depths = (KvStat*)(buffer + mstrings + sizeof(char**)*nstrings);
+  ctx.cdptr = &ctx.depths[0];
+  ctx.nkeys = 0L;
+  ctx.nvals  = 0L;
+  KvStatInit(ctx.cdptr);
+  
+  
+  int status = RootParseStats(&ctx, true);
   
   if (!status)
-    goto jump_kv_parse_free;
-  
+  goto jump_kv_parse_free;
+
+  print_dbg("\n\n");
   char* pos = buffer;
   for (ulong i = 0; i < nstrings; i++) {
-    print("%s\n", pos);
+    print_dbg("%s\n", pos);
     pos += strlen(pos)+1;
   }
-  print("\n\n");
+  print_dbg("\n\n");
 
-  char** strings = (char**)(buffer + mstrings);
-  for (ulong i = 0; i < nstrings; i++) {
-    print("%s\n", strings[i]);
-  }
+print_dbg("\n\n");
+for (ulong i = 0; i<=ctx.ndepth; i++) {
+  KvStat* cstat = ctx.depths + i;
+  print_dbg("-----level(%ld)-----\n", i);
+  print_dbg(" no keys    : %ld\n", cstat->nkeys);
+  print_dbg(" no values  : %ld\n", cstat->nvals);
+  print_dbg(" mem keys   : %ld\n", cstat->mkeys);
+  print_dbg(" mem values : %ld\n", cstat->mvals);
+}
+print_dbg(  "----total-stat----\n");
+print_dbg(" total keys  : %ld\n", ctx.nkeys);
+print_dbg(" total vals  : %ld\n", ctx.nvals);
+print_dbg("------------------\n\n");
+
+// pass params
+ulong arena_size = 0L;
+arena_size += (ctx.nkeys + ctx.nvals) * sizeof(string);
+arena_size += mstrings;
+arena_size += sizeof(KvObj)*(ctx.ndepth+1);
+arena_size += sizeof(KvValue)*ctx.nkeys;
+
+uchar* abuffer = malloc(arena_size);
+uarena farena;
+uarena_init(&farena, abuffer, arena_size);
+
+
+ctx.farena = &farena;
+KvObj* kobjs = (KvObj*) uarena_alloc(ctx.farena, sizeof(KvObj)*(ctx.ndepth+1));
+char* sbuffer = (char*) uarena_alloc(ctx.farena, mstrings);
+
+ctx.cstate = Start;
+ctx.tokens = tokens;
+ctx.ntokens = ntokens;
+ctx.cindex = 0L;
+ctx.coffset = 0L;
+ctx.ndepth = 0L;
+
+ctx.cobj = kobjs;
+ctx.robj = kobjs;
+
+
+
+ctx.mdepth = nstrings;
+ctx.cstrpos = sbuffer;
+
+RootParse(&ctx, true);
+
+print_dbg("\narena mem : %ld\narena alc: %ld\n", arena_size, farena.offset);
+
+PrintKv(kobjs);
+
+free(buffer);
 jump_kv_parse_free:
-  free(buffer);
-  return status;
+if (status) return kobjs;
+free (kobjs);
+return NULL;
 }
 
 // tokenizer errors
 void perr_tokenizer_str_close(const char *src, long len_str, long line_count,
-                              long line_start_index, long symbol_index);
-void perr_tokenizer_escape(const char *src, long len_str, long line_count,
+  long line_start_index, long symbol_index);
+  void perr_tokenizer_escape(const char *src, long len_str, long line_count,
                            long line_start_index, long symbol_index);
 
 void perr_tokenizer_str_close(const char *src, long len_str, long line_count,
@@ -475,18 +383,17 @@ void KvInit() {
 //   return raddr;
 // }
 
-// KvValue *KvObjGetValue(KvObj *pobj, string key) {
-//   ulong nkeys = pobj->kcount;
-//   string cstr = pobj->keys;
-//   for (ulong i = 0; i < nkeys; i++) {
-//     if (strcmp(key, cstr) == 0)
-//       return &pobj->values[i]; // match found
-//     cstr += strlen(cstr) + 1;
-//   }
-//   return NULL;
-// }
+KvValue *KvObjGetValue(KvObj *pobj, string key) {
+  ulong nkeys = pobj->count;
+  for (ulong i = 0; i < nkeys; i++) {
+    if (strcmp(key, pobj->keys[i]) == 0)
+      return &pobj->values[i]; // match found
+  }
+  return NULL;
+}
 
-int KvLoadFile(struct KvObj *pobj, const char *path) {
+KvObj* KvLoadFile(const char *path) {
+  //     cstr += strlen(cstr) + 1;
   if (!__kv_init)
     KvInit();
 
@@ -671,11 +578,11 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
   #endif
   // recursive parsing
   print_dbg(CS_BOLD CS_YELLOW "dbg_print::parsing tokens::\n" CS_RESET);
-  KvParse(tokens, ntokens, nstrings, mstrings);
-
-ftkn_exit:
+  KvObj* res = KvParse(tokens, ntokens, nstrings, mstrings);
+  
+  ftkn_exit:
   free(src);
-  return 0;
+  return res;
 }
 
 // string KvValueGetValueIndex(struct KvValue *pval, ulong index) {
@@ -693,4 +600,453 @@ ftkn_exit:
 
 // bool KvValueIsObj(struct KvValue *pval) { return pval->obj != NULL; }
 
-// void KvObjFree(KvObj *pobj) {}
+void KvObjFree(KvObj *pobj) {
+  free(pobj);
+}
+
+
+
+int RootParseStats(ParseCtx *ctx, bool root) {
+  const char *token;
+  bool accept = false;
+  ulong scdepth;
+  // warning:: the tokens should only be incremented by 1 one step
+  while ((ctx->ntokens != ctx->cindex) && !accept) {
+    token = ctx->tokens + ctx->coffset;
+    char sym = token[0];
+    token += 1;
+    if (sym != pstr)
+      sym = token[0];
+
+    switch (ctx->cstate) {
+    case Start:
+      switch (sym) {
+      case ' ':
+        break;
+      case '\n':
+        break;
+      case '{':
+        ctx->cstate = KEntry;
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case KEntry:
+      switch (sym) {
+      case '}':
+        ctx->cstate = End;
+        break;
+      case 's':
+        print_dbg("%s : ", token);
+        ctx->nkeys++;
+        ctx->cdptr->nkeys++;
+        ctx->cdptr->mkeys += strlen(token) + 1;
+        // to string buffer
+        strcpy(ctx->cstrpos, token);
+        ctx->cstrpos += strlen(token)+1;
+
+        ctx->cstate = SeekColon;
+        break;
+      case '\n':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case SeekColon:
+      switch (sym) {
+      case ':':
+        ctx->cstate = VEntry;
+        break;
+      case '\n':
+        break;
+      case ' ':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case VEntry:
+      switch (sym) {
+      case 's':
+        print_dbg("%s\n", token);
+        
+        ctx->nvals++;
+        ctx->cdptr->nvals ++;
+        ctx->cdptr->mvals += strlen(token) + 1;
+
+        // to string buffer
+        strcpy(ctx->cstrpos, token);
+        //to pointer buffer
+        ctx->cstrpos += strlen(token)+1;
+
+        ctx->cstate = SeekComma;
+        break;
+      case '[':
+        print_dbg("[");
+        ctx->cstate = LEntry;
+        break;
+      case '{':
+        scdepth = ctx->cdepth;
+        ctx->ndepth++;
+        assert(ctx->ndepth < ctx->mdepth);
+        ctx->cdepth = ctx->ndepth;
+        ctx->cdptr = ctx->depths + ctx->cdepth;
+        KvStatInit(ctx->cdptr);
+        // consume token and forward
+        print_dbg("\n");
+        ctx->cindex++;
+        ctx->coffset += strlen(token) + 2;
+        ctx->cstate = KEntry; 
+        int status = RootParseStats(ctx, false);
+        if (!status)
+          return 0;
+        ctx->cdepth = scdepth;
+        ctx->cdptr = ctx->depths + ctx->cdepth;
+        ctx->cstate = SeekComma;
+        
+        goto rp_skip_increments;
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case SeekComma:
+      switch (sym) {
+      case ',':
+        ctx->cstate = KEntry;
+        break;
+      case ' ':
+        break;
+      case '\n':
+        break;
+      case '}':
+        ctx->cstate = End;
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case LEntry:
+      switch (sym) {
+      case 's':
+        ctx->nvals++;
+        ctx->cdptr->nvals++;
+        ctx->cdptr->mvals += strlen(token) + 1;
+        print_dbg("%s ", token);
+
+        // to string buffer
+        strcpy(ctx->cstrpos, token);
+        //to pointer buffer
+        ctx->cstrpos += strlen(token)+1;
+        
+        ctx->cstate = LSeekComma;
+        break;
+      case ']':
+        print_dbg("]\n");
+        ctx->cstate = SeekComma;
+        break;
+      case ' ':
+        break;
+      case '\n':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case LSeekComma:
+      switch (sym) {
+      case ',':
+        ctx->cstate = LEntry;
+        break;
+      case ']':
+        print_dbg("]\n");
+        ctx->cstate = SeekComma;
+        break;
+      case '\n':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case End:
+      if (!root){
+        accept = true;
+        goto rp_skip_increments;
+      }
+      else {
+        switch (sym) {
+        case ' ':
+          break;
+        case '\n':
+          break;
+        default:
+          // unexpected entry
+          print("syntax error:: unexpected token \n");
+          return 0;
+          break;
+        }
+      }
+      break;
+    }
+
+    ctx->cindex++; // incr the token index
+    ctx->coffset += strlen(token) + 2; // offset to next token addr
+rp_skip_increments:;
+  }
+  return 1;
+}
+
+
+int RootParse(ParseCtx *ctx, bool root) {
+  const char *token;
+  bool accept = false;
+  ulong scdepth;
+  KvObj *cobj;
+  // warning:: the tokens should only be incremented by 1 one step
+  while ((ctx->ntokens != ctx->cindex) && !accept) {
+    token = ctx->tokens + ctx->coffset;
+    char sym = token[0];
+    token += 1;
+    if (sym != pstr)
+      sym = token[0];
+
+    switch (ctx->cstate) {
+    case Start:
+      switch (sym) {
+      case ' ':
+        break;
+      case '\n':
+        break;
+      case '{':
+        ctx->cobj->keys = (string*) uarena_alloc(ctx->farena, ctx->cdptr->nkeys * sizeof(string*));
+        ctx->cobj->values = (KvValue*) uarena_alloc(ctx->farena, ctx->cdptr->nkeys * sizeof(KvValue));
+        ctx->cobj->count = 0L;
+
+        ctx->cstate = KEntry;
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case KEntry:
+      switch (sym) {
+      case '}':
+        ctx->cstate = End;
+        break;
+      case 's':
+        print_dbg("%s : ", token);
+        // to string buffer
+        strcpy(ctx->cstrpos, token);
+        
+        ctx->cobj->keys[ctx->cobj->count] = (string) ctx->cstrpos;
+        ctx->cobj->values[ctx->cobj->count].count = 0;
+        ctx->cobj->values[ctx->cobj->count].obj = NULL;
+        ctx->cobj->count++;
+        ctx->cstrpos += strlen(token)+1;
+        ctx->cstate = SeekColon;
+        break;
+      case '\n':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case SeekColon:
+      switch (sym) {
+      case ':':
+        ctx->cstate = VEntry;
+        break;
+      case '\n':
+        break;
+      case ' ':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case VEntry:
+      switch (sym) {
+      case 's':
+        print_dbg("%s\n", token);
+        // to string buffer
+        strcpy(ctx->cstrpos, token);
+        ulong cindx = ctx->cobj->count-1;
+
+        ctx->cobj->values[cindx].entries = (string*)uarena_alloc(ctx->farena,  sizeof(string));
+        ctx->cobj->values[cindx].entries[ctx->cobj->values[cindx].count] = ctx->cstrpos;
+        ctx->cobj->values[cindx].count++;
+
+        ctx->cstrpos += strlen(token)+1;
+
+        ctx->cstate = SeekComma;
+        break;
+      case '[':
+        print_dbg("[");
+        ctx->cobj->values[ctx->cobj->count-1].entries = NULL;
+        ctx->cstate = LEntry;
+        break;
+      case '{':
+        cobj = ctx->cobj;
+        ctx->ndepth++;
+        ctx->cobj = ctx->robj + ctx->ndepth;
+        cobj->values[cobj->count-1].obj = ctx->cobj;
+        
+        // consume token and forward
+        print_dbg("\n");
+        ctx->cindex++;
+        ctx->coffset += strlen(token) + 2;
+        ctx->cstate = KEntry; 
+        ctx->cdptr = ctx->depths + ctx->ndepth;
+  
+        ctx->cobj->keys = (string*) uarena_alloc(ctx->farena, ctx->cdptr->nkeys * sizeof(string*));
+        ctx->cobj->values = (KvValue*) uarena_alloc(ctx->farena, ctx->cdptr->nkeys * sizeof(KvValue));
+        ctx->cobj->count = 0L;
+
+        int status = RootParse(ctx, false);
+        if (!status)
+          return 0;
+
+        ctx->cobj = cobj;
+        ctx->cstate = SeekComma;
+        
+        goto rp_skip_increments;
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case SeekComma:
+      switch (sym) {
+      case ',':
+        ctx->cstate = KEntry;
+        break;
+      case ' ':
+        break;
+      case '\n':
+        break;
+      case '}':
+        ctx->cstate = End;
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case LEntry:
+      switch (sym) {
+      case 's':
+        print_dbg("%s ", token);
+
+        // to string buffer
+        strcpy(ctx->cstrpos, token);
+        
+        ctx->cobj->values[ctx->cobj->count-1].obj = NULL;
+        
+        
+        if (!ctx->cobj->values[ctx->cobj->count-1].entries)
+          ctx->cobj->values[ctx->cobj->count-1].entries = (string*)uarena_alloc(ctx->farena,  sizeof(string*));
+        else
+          uarena_alloc(ctx->farena,  sizeof(string*));
+        ctx->cobj->values[ctx->cobj->count-1].entries[ctx->cobj->values[ctx->cobj->count-1].count] = (string) ctx->cstrpos;
+        ctx->cobj->values[ctx->cobj->count-1].count++;
+        ctx->cstrpos += strlen(token)+1;
+        
+        ctx->cstate = LSeekComma;
+        break;
+      case ']':
+        print_dbg("]\n");
+        ctx->cstate = SeekComma;
+        break;
+      case ' ':
+        break;
+      case '\n':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case LSeekComma:
+      switch (sym) {
+      case ',':
+        ctx->cstate = LEntry;
+        break;
+      case ']':
+        print_dbg("]\n");
+        ctx->cstate = SeekComma;
+        break;
+      case '\n':
+        break;
+      default:
+        // unexpected entry
+        print("syntax error:: unexpected token \n");
+        return 0;
+        break;
+      }
+      break;
+    case End:
+      if (!root){
+        accept = true;
+        goto rp_skip_increments;
+      }
+      else {
+        switch (sym) {
+        case ' ':
+          break;
+        case '\n':
+          break;
+        default:
+          // unexpected entry
+          print("syntax error:: unexpected token \n");
+          return 0;
+          break;
+        }
+      }
+      break;
+    }
+
+    ctx->cindex++; // incr the token index
+    ctx->coffset += strlen(token) + 2; // offset to next token addr
+rp_skip_increments:;
+  }
+  return 1;
+}
