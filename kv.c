@@ -2,16 +2,10 @@
 #include <sys/types.h>
 #define KV_BOUNDS_CHECK
 #define KV_UARENA_BOUNDS_CHECK
-#define DEBUG
+// #define DEBUG
 #define KV_REALLOC
 
 #include "kv.h"
-
-#ifndef KV_TYPES
-typedef struct KvObj KvObj;
-typedef struct KvValue KvValue;
-typedef const char *string;
-#endif
 
 // internal methods, data structures and includes
 #ifdef KV_BOUNDS_CHECK
@@ -110,24 +104,52 @@ typedef enum {
   End // "Accepted Phase"
 } PStates;
 
-typedef struct {
+
+struct ParseCtx;
+typedef struct ParseCtx ParseCtx;
+
+
+// struct Obj 
+// {
+//     const char* key;
+//     const char** values;
+//     ulong nvalues;
+//     struct Obj* child;
+//     struct Obj* next;
+//   };
+  
+//   struct Obj objs[1000];
+//   const char* sptrs[1000];
+//   ulong iobj = 0;
+//   ulong istpr = 0;
+
+
+struct ParseCtx{
   PStates cstate; // current state
   char *tokens;   // tokens buffer
   ulong ntokens;  // total no of tokens
   ulong cindex;   // current token index
   ulong coffset;  // current token offset
-  // upload params
-  KvObj *cobj;    // current object
-  char* cstrpos; // current string pos in string buffer
-  char** cpstr;  // current string pointer pos in string pointer buffer
-} ParseCtx;
+  
+  // for return objs
+  KvObj* objs;
+  cstring* stprs;
+  ulong iobj;
+  ulong istpr;
+};
 
 int RootParse(ParseCtx *ctx, bool root);
-int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings);
+int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings, struct KvResult* res);
+
+
+
+#define gobj(i) &((ctx->objs)[i])
+
 
 int RootParse(ParseCtx *ctx, bool root) {
   const char *token;
   bool accept = false;
+  struct KvObj* before = NULL;
   // warning:: the tokens should only be incremented by 1 one step
   while ((ctx->ntokens != ctx->cindex) && !accept) {
     token = ctx->tokens + ctx->coffset;
@@ -160,12 +182,16 @@ int RootParse(ParseCtx *ctx, bool root) {
         break;
       case 's':
         print_dbg("%s : ", token);
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
+
+        if (before)
+        {
+            before->next = gobj(ctx->iobj);
+        }
+        
+        ctx->iobj++;
+        before = gobj(ctx->iobj-1);
+        before->values = ctx->stprs + ctx->istpr;
+        before->key = token;
 
         ctx->cstate = SeekColon;
         break;
@@ -198,14 +224,10 @@ int RootParse(ParseCtx *ctx, bool root) {
       switch (sym) {
       case 's':
         print_dbg("%s\n", token);
-        
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
+        ctx->stprs[ctx->istpr] = token;
+        ctx->istpr++;
         //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
-
+        before->nvalues++;
         ctx->cstate = SeekComma;
         break;
       case '[':
@@ -218,6 +240,8 @@ int RootParse(ParseCtx *ctx, bool root) {
         ctx->cindex++;
         ctx->coffset += strlen(token) + 2;
         ctx->cstate = KEntry; 
+        
+        (gobj(ctx->iobj-1))->child = gobj(ctx->iobj);
         int status = RootParse(ctx, false);
         if (!status)
           return 0;
@@ -255,12 +279,8 @@ int RootParse(ParseCtx *ctx, bool root) {
       case 's':
         print_dbg("%s ", token);
 
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
+        ctx->stprs[ctx->istpr] = token;
+        ctx->istpr++;
         
         ctx->cstate = LSeekComma;
         break;
@@ -325,7 +345,7 @@ rp_skip_increments:;
   return 1;
 }
 
-int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings) {
+int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings, struct KvResult* res) {
   ParseCtx ctx;
   ctx.cstate = Start;
   ctx.tokens = tokens;
@@ -333,35 +353,46 @@ int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings) {
   ctx.cindex = 0L;
   ctx.coffset = 0L;
 
-  ulong max_mem_size = mstrings + sizeof(char**)*nstrings + sizeof(KvValue)*nstrings;
+  ulong max_mem_size = (ntokens)*(sizeof(KvObj)+sizeof(cstring*));
   
   // print_dbg(CS_BOLD CS_YELLOW"dub_info::total mem prediction for KvParse:: %lu\n"CS_RESET, max_mem_size);
   
-  char* buffer = malloc(mstrings + sizeof(char**)*nstrings);
-  KvObj res;
   
+  unsigned char* buffer = calloc(max_mem_size, 1);
+  assert(buffer);
   
-  ctx.cobj = &res; 
-  ctx.cstrpos = buffer;
-  ctx.cpstr = (char**)(buffer + mstrings);
+  ulong offset = 0;
+  
+  ctx.objs = (KvObj*)(buffer + offset);
+  ctx.iobj = 0L;
+
+  offset += ntokens * sizeof(KvObj);
+  
+  ctx.stprs = (cstring*)(buffer + offset); 
+  ctx.istpr = 0L;
+  
   int status = RootParse(&ctx, true);
   
   if (!status)
     goto jump_kv_parse_free;
   
-  char* pos = buffer;
-  for (ulong i = 0; i < nstrings; i++) {
-    print("%s\n", pos);
-    pos += strlen(pos)+1;
-  }
-  print("\n\n");
+  // char* pos = buffer;
+  // for (ulong i = 0; i < nstrings; i++) {
+  //   print("%s\n", pos);
+  //   pos += strlen(pos)+1;
+  // }
+  // print("\n\n");
 
-  char** strings = (char**)(buffer + mstrings);
-  for (ulong i = 0; i < nstrings; i++) {
-    print("%s\n", strings[i]);
-  }
+  // char** strings = (char**)(buffer + mstrings);
+  // for (ulong i = 0; i < nstrings; i++) {
+  //   print("%s\n", strings[i]);
+  // }
+
+  // print all
+  res->__buffers[1] = buffer;
+  res->obj = ctx.objs;
 jump_kv_parse_free:
-  free(buffer);
+//   free(buffer);
   return status;
 }
 
@@ -486,7 +517,7 @@ void KvInit() {
 //   return NULL;
 // }
 
-int KvLoadFile(struct KvObj *pobj, const char *path) {
+int KvLoadFile(struct KvResult *pobj, const char *path) {
   if (!__kv_init)
     KvInit();
 
@@ -633,7 +664,7 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
   print_dbg(CS_BOLD CS_YELLOW "dbg_print::tokenizer tokens::\n" CS_RESET);
   #ifdef DEBUG
   uint toffset = 0L;
-  string token;
+  cstring token;
   print(CS_BOLD "[ " CS_RESET);
   for (uint i = 0; i < ntokens; i++) {
     token = tokens + toffset;
@@ -671,26 +702,24 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
   #endif
   // recursive parsing
   print_dbg(CS_BOLD CS_YELLOW "dbg_print::parsing tokens::\n" CS_RESET);
-  KvParse(tokens, ntokens, nstrings, mstrings);
-
+  
+  KvParse(tokens, ntokens, nstrings, mstrings, pobj);
+  pobj->__buffers[0] = (uchar*)src;
+  return 1;
 ftkn_exit:
-  free(src);
+//   free(src);
   return 0;
 }
 
-// string KvValueGetValueIndex(struct KvValue *pval, ulong index) {
 
-//   #ifdef KV_BOUNDS_CHECK
-//   assert(index <= pval->vcount);
-//   #endif
 
-//   string raddr = pval->values;
-//   for (ulong i = 0L; i < pval->vcount; i++) {
-//     raddr += strlen(raddr) + 1;
-//   }
-//   return raddr;
-// }
-
-// bool KvValueIsObj(struct KvValue *pval) { return pval->obj != NULL; }
-
-// void KvObjFree(KvObj *pobj) {}
+void KvObjFree(struct KvResult* res)
+{
+  uchar* buffer1 = res->__buffers[0];
+  uchar* buffer2 = res->__buffers[1];
+  if (buffer1) free(buffer1);
+  if (buffer2) free(buffer2);
+  res->__buffers[0] = NULL;
+  res->__buffers[1] = NULL;
+  res->obj = NULL;
+}
