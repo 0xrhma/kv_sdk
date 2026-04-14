@@ -9,7 +9,7 @@ void KvPrint(ulong spaces, struct KvObj* obj)
   fprintf(stderr, "%s : [", obj->key);
   for (ulong i = 0; i < obj->nvalues; i++)
   {
-    fprintf(stderr, " %s ", obj->values[i]);
+    fprintf(stderr, " \'%s\' ", obj->values[i]);
   }
   fprintf(stderr, "]\n");
   if (obj->child)

@@ -373,7 +373,7 @@ int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings, struct 
   
   int status = RootParse(&ctx, true);
   
-  if (!status)
+  if (0 == status)
     goto jump_kv_parse_free;
   
   // char* pos = buffer;
@@ -391,9 +391,10 @@ int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings, struct 
   // print all
   res->__buffers[1] = buffer;
   res->obj = ctx.objs;
+  return 1;
 jump_kv_parse_free:
-//   free(buffer);
-  return status;
+  free(buffer);
+  return 0;
 }
 
 // tokenizer errors
@@ -604,7 +605,7 @@ int KvLoadFile(struct KvResult *pobj, const char *path) {
               mstrings += nlen + 1;
               ntokens++;
             } else {
-              offset += string_appendn(tokens, "", 0L, offset, false);
+              offset += string_appendn(tokens, "", 0L, offset, true);
               nstrings++;
               mstrings += 1L;
               ntokens++;
@@ -652,6 +653,7 @@ int KvLoadFile(struct KvResult *pobj, const char *path) {
 
   #ifdef KV_REALLOC
   src = (char *)realloc(src, offset + fsize + 1);
+  // offset after realloc for addr change
   tokens = src + fsize + 1;
   #endif
 
@@ -703,11 +705,17 @@ int KvLoadFile(struct KvResult *pobj, const char *path) {
   // recursive parsing
   print_dbg(CS_BOLD CS_YELLOW "dbg_print::parsing tokens::\n" CS_RESET);
   
-  KvParse(tokens, ntokens, nstrings, mstrings, pobj);
   pobj->__buffers[0] = (uchar*)src;
+  
+  int status = KvParse(tokens, ntokens, nstrings, mstrings, pobj);
+  if (!status)
+  {
+    free(src);
+    return 0;
+  }
   return 1;
 ftkn_exit:
-//   free(src);
+  free(src);
   return 0;
 }
 
