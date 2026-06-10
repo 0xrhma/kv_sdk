@@ -2,24 +2,18 @@
 #include <sys/types.h>
 #define KV_BOUNDS_CHECK
 #define KV_UARENA_BOUNDS_CHECK
-#define DEBUG
+// #define DEBUG
 #define KV_REALLOC
 
 #include "kv.h"
-
-#ifndef KV_TYPES
-typedef struct KvObj KvObj;
-typedef struct KvValue KvValue;
-typedef const char *string;
-#endif
 
 // internal methods, data structures and includes
 #ifdef KV_BOUNDS_CHECK
 #endif
 #include <assert.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
 #define print(...) fprintf(stderr, __VA_ARGS__)
 #define printc(val) putc(val, stderr)
@@ -62,7 +56,8 @@ char pstr = 's'; // prefix for strings
 
 // "data types"
 
-typedef struct {
+typedef struct
+{
   unsigned char *buffer;
   ulong offset;
 #ifdef KV_UARENA_BOUNDS_CHECK
@@ -71,26 +66,30 @@ typedef struct {
 } uarena;
 
 #ifdef KV_UARENA_BOUNDS_CHECK
-void uarena_init(uarena *arena, unsigned char *addr, ulong tsize) {
+void uarena_init(uarena *arena, unsigned char *addr, ulong tsize)
+{
   assert(addr != NULL);
   arena->buffer = addr;
   arena->offset = 0L;
   arena->tsize = tsize;
 }
 
-unsigned char *uarena_alloc(uarena *arena, ulong size) {
+unsigned char *uarena_alloc(uarena *arena, ulong size)
+{
   unsigned char *addr = arena->buffer + arena->offset;
   arena->offset += size;
   assert(arena->offset <= arena->tsize);
   return addr;
 }
 #else
-void uarena_init(uarena *arena, unsigned char *addr) {
+void uarena_init(uarena *arena, unsigned char *addr)
+{
   arena->buffer = addr;
   arena->offset = 0L;
 }
 
-unsigned char *uarena_alloc(uarena *arena, ulong size) {
+unsigned char *uarena_alloc(uarena *arena, ulong size)
+{
   unsigned char *addr = arena->buffer + arena->offset;
   arena->offset += size;
   return addr;
@@ -99,7 +98,8 @@ unsigned char *uarena_alloc(uarena *arena, ulong size) {
 
 // internal util functions
 
-typedef enum {
+typedef enum
+{
   Start, // "Start"
   KEntry,
   SeekColon,
@@ -110,222 +110,267 @@ typedef enum {
   End // "Accepted Phase"
 } PStates;
 
-typedef struct {
+struct ParseCtx;
+typedef struct ParseCtx ParseCtx;
+
+// struct Obj
+// {
+//     const char* key;
+//     const char** values;
+//     ulong nvalues;
+//     struct Obj* child;
+//     struct Obj* next;
+//   };
+
+//   struct Obj objs[1000];
+//   const char* sptrs[1000];
+//   ulong iobj = 0;
+//   ulong istpr = 0;
+
+struct ParseCtx
+{
   PStates cstate; // current state
   char *tokens;   // tokens buffer
   ulong ntokens;  // total no of tokens
   ulong cindex;   // current token index
   ulong coffset;  // current token offset
-  // upload params
-  KvObj *cobj;    // current object
-  char* cstrpos; // current string pos in string buffer
-  char** cpstr;  // current string pointer pos in string pointer buffer
-} ParseCtx;
+
+  // for return objs
+  KvObj *objs;
+  cstring *stprs;
+  ulong iobj;
+  ulong istpr;
+};
 
 int RootParse(ParseCtx *ctx, bool root);
-int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings);
+int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings,
+            struct KvResult *res);
 
-int RootParse(ParseCtx *ctx, bool root) {
+#define gobj(i) &((ctx->objs)[i])
+
+int RootParse(ParseCtx *ctx, bool root)
+{
+  int nkeys = 1; //  -1 to get the keys :(
   const char *token;
   bool accept = false;
+  struct KvObj *before = NULL;
   // warning:: the tokens should only be incremented by 1 one step
-  while ((ctx->ntokens != ctx->cindex) && !accept) {
+  while ((ctx->ntokens != ctx->cindex) && !accept)
+  {
     token = ctx->tokens + ctx->coffset;
     char sym = token[0];
     token += 1;
     if (sym != pstr)
       sym = token[0];
 
-    switch (ctx->cstate) {
-    case Start:
-      switch (sym) {
-      case ' ':
-        break;
-      case '\n':
-        break;
-      case '{':
-        ctx->cstate = KEntry;
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case KEntry:
-      switch (sym) {
-      case '}':
-        ctx->cstate = End;
-        break;
-      case 's':
-        print_dbg("%s : ", token);
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
-
-        ctx->cstate = SeekColon;
-        break;
-      case '\n':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case SeekColon:
-      switch (sym) {
-      case ':':
-        ctx->cstate = VEntry;
-        break;
-      case '\n':
-        break;
-      case ' ':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case VEntry:
-      switch (sym) {
-      case 's':
-        print_dbg("%s\n", token);
-        
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
-
-        ctx->cstate = SeekComma;
-        break;
-      case '[':
-        print_dbg("[");
-        ctx->cstate = LEntry;
-        break;
-      case '{':
-        // consume token and forward
-        print_dbg("\n");
-        ctx->cindex++;
-        ctx->coffset += strlen(token) + 2;
-        ctx->cstate = KEntry; 
-        int status = RootParse(ctx, false);
-        if (!status)
-          return 0;
-        ctx->cstate = SeekComma;
-        goto rp_skip_increments;
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case SeekComma:
-      switch (sym) {
-      case ',':
-        ctx->cstate = KEntry;
-        break;
-      case ' ':
-        break;
-      case '\n':
-        break;
-      case '}':
-        ctx->cstate = End;
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case LEntry:
-      switch (sym) {
-      case 's':
-        print_dbg("%s ", token);
-
-        // to string buffer
-        strcpy(ctx->cstrpos, token);
-        //to pointer buffer
-        ctx->cpstr[0] = ctx->cstrpos; 
-        ctx->cstrpos += strlen(token)+1;
-        ctx->cpstr += 1;
-        
-        ctx->cstate = LSeekComma;
-        break;
-      case ']':
-        print_dbg("]\n");
-        ctx->cstate = SeekComma;
-        break;
-      case ' ':
-        break;
-      case '\n':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case LSeekComma:
-      switch (sym) {
-      case ',':
-        ctx->cstate = LEntry;
-        break;
-      case ']':
-        print_dbg("]\n");
-        ctx->cstate = SeekComma;
-        break;
-      case '\n':
-        break;
-      default:
-        // unexpected entry
-        print("syntax error:: unexpected token \n");
-        return 0;
-        break;
-      }
-      break;
-    case End:
-      if (!root){
-        accept = true;
-        goto rp_skip_increments;
-      }
-      else {
-        switch (sym) {
-        case ' ':
-          break;
-        case '\n':
-          break;
-        default:
-          // unexpected entry
-          print("syntax error:: unexpected token \n");
-          return 0;
-          break;
+    switch (ctx->cstate)
+    {
+      case Start:
+        switch (sym)
+        {
+          case ' ':
+            break;
+          case '\n':
+            break;
+          case '{':
+            ctx->cstate = KEntry;
+            break;
+          default:
+            // unexpected entry
+            print("syntax error:: unexpected token \n");
+            return 0;
+            break;
         }
-      }
-      break;
+        break;
+      case KEntry:
+        switch (sym)
+        {
+          case '}':
+            ctx->cstate = End;
+            break;
+          case 's':
+          print_dbg("%s : ", token);
+          
+          if (before)
+          {
+            before->next = gobj(ctx->iobj);
+          }
+          
+          ctx->iobj++;
+          before = gobj(ctx->iobj - 1);
+          before->values = ctx->stprs + ctx->istpr;
+          before->key = token;
+          
+          ctx->cstate = SeekColon;
+          nkeys++;
+          break;
+          case '\n':
+            break;
+          default:
+            // unexpected entry
+            print("syntax error:: unexpected token \n");
+            return 0;
+            break;
+        }
+        break;
+      case SeekColon:
+        switch (sym)
+        {
+          case ':':
+            ctx->cstate = VEntry;
+            break;
+          case '\n':
+            break;
+          case ' ':
+            break;
+          default:
+            // unexpected entry
+            print("syntax error:: unexpected token \n");
+            return 0;
+            break;
+        }
+        break;
+      case VEntry:
+        switch (sym)
+        {
+          case 's':
+            print_dbg("%s\n", token);
+            ctx->stprs[ctx->istpr] = token;
+            ctx->istpr++;
+            // to pointer buffer
+            before->nvalues++;
+            ctx->cstate = SeekComma;
+            break;
+          case '[':
+            print_dbg("[");
+            ctx->cstate = LEntry;
+            break;
+          case '{':
+            // consume token and forward
+            print_dbg("\n");
+            ctx->cindex++;
+            ctx->coffset += strlen(token) + 2;
+            ctx->cstate = KEntry;
+
+            KvObj* _cobj = (gobj(ctx->iobj - 1));
+            _cobj->child = gobj(ctx->iobj);
+            int status = RootParse(ctx, false);
+            if (!status)
+              return 0;
+            if (status == 1)
+            {
+              _cobj->child = NULL;
+            }
+            ctx->cstate = SeekComma;
+            goto rp_skip_increments;
+            break;
+          default:
+            // unexpected entry
+            print("syntax error:: unexpected token \n");
+            return 0;
+            break;
+        }
+        break;
+      case SeekComma:
+        switch (sym)
+        {
+          case ',':
+            ctx->cstate = KEntry;
+            break;
+          case ' ':
+            break;
+          case '\n':
+            break;
+          case '}':
+            ctx->cstate = End;
+            break;
+          default:
+            // unexpected entry
+            print("syntax error:: unexpected token \n");
+            return 0;
+            break;
+        }
+        break;
+      case LEntry:
+        switch (sym)
+        {
+          case 's':
+            print_dbg("%s ", token);
+
+            ctx->stprs[ctx->istpr] = token;
+            ctx->istpr++;
+            before->nvalues++;
+
+            ctx->cstate = LSeekComma;
+            break;
+          case ']':
+            print_dbg("]\n");
+            ctx->cstate = SeekComma;
+            break;
+          case ' ':
+            break;
+          case '\n':
+            break;
+          default:
+            // unexpected entry
+            print("syntax error:: unexpected token \n");
+            return 0;
+            break;
+        }
+        break;
+      case LSeekComma:
+        switch (sym)
+        {
+          case ',':
+            ctx->cstate = LEntry;
+            break;
+          case ']':
+            print_dbg("]\n");
+            ctx->cstate = SeekComma;
+            break;
+          case '\n':
+            break;
+          default:
+            // unexpected entry
+            print("syntax error:: unexpected token \n");
+            return 0;
+            break;
+        }
+        break;
+      case End:
+        if (!root)
+        {
+          accept = true;
+          goto rp_skip_increments;
+        }
+        else
+        {
+          switch (sym)
+          {
+            case ' ':
+              break;
+            case '\n':
+              break;
+            default:
+              // unexpected entry
+              print("syntax error:: unexpected token \n");
+              return 0;
+              break;
+          }
+        }
+        break;
     }
 
-    ctx->cindex++; // incr the token index
+    ctx->cindex++;                     // incr the token index
     ctx->coffset += strlen(token) + 2; // offset to next token addr
-rp_skip_increments:;
+  rp_skip_increments:;
   }
-  return 1;
+  return nkeys;
 }
 
-int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings) {
+int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings,
+            struct KvResult *res)
+{
   ParseCtx ctx;
   ctx.cstate = Start;
   ctx.tokens = tokens;
@@ -333,36 +378,48 @@ int KvParse(char *tokens, ulong ntokens, ulong nstrings, ulong mstrings) {
   ctx.cindex = 0L;
   ctx.coffset = 0L;
 
-  ulong max_mem_size = mstrings + sizeof(char**)*nstrings + sizeof(KvValue)*nstrings;
-  
-  // print_dbg(CS_BOLD CS_YELLOW"dub_info::total mem prediction for KvParse:: %lu\n"CS_RESET, max_mem_size);
-  
-  char* buffer = malloc(mstrings + sizeof(char**)*nstrings);
-  KvObj res;
-  
-  
-  ctx.cobj = &res; 
-  ctx.cstrpos = buffer;
-  ctx.cpstr = (char**)(buffer + mstrings);
-  int status = RootParse(&ctx, true);
-  
-  if (!status)
-    goto jump_kv_parse_free;
-  
-  char* pos = buffer;
-  for (ulong i = 0; i < nstrings; i++) {
-    print("%s\n", pos);
-    pos += strlen(pos)+1;
-  }
-  print("\n\n");
+  ulong max_mem_size = (ntokens) * (sizeof(KvObj) + sizeof(cstring *));
 
-  char** strings = (char**)(buffer + mstrings);
-  for (ulong i = 0; i < nstrings; i++) {
-    print("%s\n", strings[i]);
-  }
+  // print_dbg(CS_BOLD CS_YELLOW"dub_info::total mem prediction for KvParse::
+  // %lu\n"CS_RESET, max_mem_size);
+
+  unsigned char *buffer = calloc(max_mem_size, 1);
+  assert(buffer);
+
+  ulong offset = 0;
+
+  ctx.objs = (KvObj *)(buffer + offset);
+  ctx.iobj = 0L;
+
+  offset += ntokens * sizeof(KvObj);
+
+  ctx.stprs = (cstring *)(buffer + offset);
+  ctx.istpr = 0L;
+
+  int status = RootParse(&ctx, true);
+
+  if (0 == status)
+    goto jump_kv_parse_free;
+
+  // char* pos = buffer;
+  // for (ulong i = 0; i < nstrings; i++) {
+  //   print("%s\n", pos);
+  //   pos += strlen(pos)+1;
+  // }
+  // print("\n\n");
+
+  // char** strings = (char**)(buffer + mstrings);
+  // for (ulong i = 0; i < nstrings; i++) {
+  //   print("%s\n", strings[i]);
+  // }
+
+  // print all
+  res->__buffers[1] = buffer;
+  res->obj = ctx.objs;
+  return 1;
 jump_kv_parse_free:
   free(buffer);
-  return status;
+  return 0;
 }
 
 // tokenizer errors
@@ -372,12 +429,14 @@ void perr_tokenizer_escape(const char *src, long len_str, long line_count,
                            long line_start_index, long symbol_index);
 
 void perr_tokenizer_str_close(const char *src, long len_str, long line_count,
-                              long line_start_index, long symbol_index) {
+                              long line_start_index, long symbol_index)
+{
   print(CS_BOLD CS_RED "syntax error (line %ld)::" CS_RESET
                        " expected [" CS_BOLD "'\"'" CS_RESET "] after \n",
         line_count);
   print(CS_BOLD "       %ld |       " CS_RESET, line_count);
-  for (long i = line_start_index; i < len_str; i++) {
+  for (long i = line_start_index; i < len_str; i++)
+  {
     if (src[i] == '\n')
       break;
     if (i == symbol_index)
@@ -389,13 +448,15 @@ void perr_tokenizer_str_close(const char *src, long len_str, long line_count,
 }
 
 void perr_tokenizer_escape(const char *src, long len_str, long line_count,
-                           long line_start_index, long symbol_index) {
+                           long line_start_index, long symbol_index)
+{
   print(CS_BOLD CS_RED "syntax error (line %ld)::" CS_RESET
                        " invalid escape sequence, must follow  [" CS_BOLD
                        "'\"', '\\'" CS_RESET "]\n",
         line_count);
   print(CS_BOLD "       %ld |       " CS_RESET, line_count);
-  for (long i = line_start_index; i < len_str; i++) {
+  for (long i = line_start_index; i < len_str; i++)
+  {
     if (src[i] == '\n')
       break;
     if (i == symbol_index)
@@ -414,7 +475,8 @@ ulong string_appendencn(char *_dest, const char *src, ulong len, ulong offset,
                         bool str);
 
 ulong string_appendn(char *_dest, const char *src, ulong len, ulong offset,
-                     bool str) {
+                     bool str)
+{
   char *dest = _dest + offset + 1;
   if (str)
     *(dest - 1) = pstr;
@@ -425,8 +487,9 @@ ulong string_appendn(char *_dest, const char *src, ulong len, ulong offset,
   return len + 2;
 }
 
-ulong string_appendencn(char * _dest, const char *src, ulong len,
-                        ulong offset, bool str) {
+ulong string_appendencn(char *_dest, const char *src, ulong len, ulong offset,
+                        bool str)
+{
   char *dest = _dest + offset + 1;
   if (str)
     *(dest - 1) = pstr;
@@ -434,15 +497,20 @@ ulong string_appendencn(char * _dest, const char *src, ulong len,
     *(dest - 1) = psym;
   ulong alen = 0L;
   unsigned char cons = 0;
-  for (ulong i = 0; i < len; i++) {
+  for (ulong i = 0; i < len; i++)
+  {
     unsigned char uchar = src[i];
-    if (uchar == '\\') {
-      if (cons) {
+    if (uchar == '\\')
+    {
+      if (cons)
+      {
         dest[alen] = uchar;
         alen++;
       }
       cons = !cons;
-    } else {
+    }
+    else
+    {
       if (uchar == '"')
         cons = 0;
       dest[alen] = uchar;
@@ -453,7 +521,8 @@ ulong string_appendencn(char * _dest, const char *src, ulong len,
   return alen + 2;
 }
 
-void KvInit() {
+void KvInit()
+{
   unsigned char csymbols[12] = {':', '{', '}', '"', '(',  ')',
                                 '[', ']', ',', ' ', '\\', '\n'};
   for (int i = 0; i < 256; i++)
@@ -486,7 +555,8 @@ void KvInit() {
 //   return NULL;
 // }
 
-int KvLoadFile(struct KvObj *pobj, const char *path) {
+int KvLoadFile(struct KvResult *pobj, const char *path)
+{
   if (!__kv_init)
     KvInit();
 
@@ -494,7 +564,8 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
                               "'%s'\n" CS_RESET,
             path);
   FILE *fp = fopen(path, "r");
-  if (!fp) {
+  if (!fp)
+  {
     print(CS_RED CS_BOLD "error:: couldn't access file::" CS_RESET CS_BOLD
                          " '%s'\n" CS_RESET,
           path);
@@ -505,7 +576,8 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
   long fsize = ftell(fp);
   fseek(fp, 0L, SEEK_SET);
   assert(fsize >= 0L); // solve later
-  if (fsize == 0L) {
+  if (fsize == 0L)
+  {
     print(CS_BOLD CS_YELLOW "warning:: " CS_RESET "file is empty '%s'\n", path);
     fclose(fp);
     return 0;
@@ -518,9 +590,11 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
   ulong max_mem_size = 4 * fsize + 1;
   char *src = (char *)(malloc(max_mem_size));
   src[fsize] = '\0';
-  char *tokens = src + fsize+1;
-  
-  fread(src, fsize, 1, fp);
+  char *tokens = src + fsize + 1;
+
+  int rlen = fread(src, 1, fsize, fp);
+  assert(rlen == fsize);
+
   fclose(fp);
 
   long si = 0L;
@@ -541,65 +615,87 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
   unsigned long offset = 0L;   // this will include the total token memory size
   unsigned long ntokens = 0L;
 
-  for (long i = 0; i < fsize; i++) {
+  for (long i = 0; i < fsize; i++)
+  {
     unsigned char cchar = src[i];
     long nlen = i - si;
-    if (clut[cchar]) {
-      if (!strseek) {
-        if (nlen) {
+    if (clut[cchar])
+    {
+      if (!strseek)
+      {
+        if (nlen)
+        {
           offset += string_appendn(tokens, src + si, nlen, offset, true);
           nstrings++;
           mstrings += nlen + 1;
           ntokens++;
         }
-        if (cchar != '"') {
-          if (cchar != ' ') {
+        if (cchar != '"')
+        {
+          if (cchar != ' ')
+          {
             offset += string_appendn(tokens, src + i, 1L, offset, false);
             ntokens++;
           }
-
-        } else {
+        }
+        else
+        {
           strseek = i + 1;
           sline = cline;
           isline = icline;
         }
         si = i + 1;
-      } else {
-        if (cchar == '"') {
-          if (!escseek) {
-            if (nlen) {
+      }
+      else
+      {
+        if (cchar == '"')
+        {
+          if (!escseek)
+          {
+            if (nlen)
+            {
               offset += string_appendencn(tokens, src + si, nlen, offset, true);
               nstrings++;
               mstrings += nlen + 1;
               ntokens++;
-            } else {
-              offset += string_appendn(tokens, "", 0L, offset, false);
+            }
+            else
+            {
+              offset += string_appendn(tokens, "", 0L, offset, true);
               nstrings++;
               mstrings += 1L;
               ntokens++;
             }
             strseek = false;
             si = i + 1;
-          } else
+          }
+          else
             escseek = false;
-        } else if (cchar == '\\') {
+        }
+        else if (cchar == '\\')
+        {
           if (escseek)
             escseek = false;
-          else {
+          else
+          {
             escseek = i + 1;
             eline = cline;
             ieline = icline;
           }
         }
       }
-    } else {
-      if (escseek) {
+    }
+    else
+    {
+      if (escseek)
+      {
         perr_tokenizer_escape(src, fsize, eline, ieline, escseek - 1);
         goto ftkn_exit;
       }
       // assert(!escseek); // invalid after escape charactor '/'
     }
-    if (cchar == '\n') {
+    if (cchar == '\n')
+    {
       cline++;
       icline = i + 1;
     }
@@ -607,8 +703,10 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
 
   long nlen = fsize - si;
 
-  if (nlen != 0) {
-    if (strseek) {
+  if (nlen != 0)
+  {
+    if (strseek)
+    {
       perr_tokenizer_str_close(src, fsize, sline, isline, strseek - 1);
       goto ftkn_exit;
     }
@@ -619,10 +717,11 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
     ntokens++;
   }
 
-  #ifdef KV_REALLOC
+#ifdef KV_REALLOC
   src = (char *)realloc(src, offset + fsize + 1);
+  // offset after realloc for addr change
   tokens = src + fsize + 1;
-  #endif
+#endif
 
   // file content log
   print_dbg(CS_BOLD CS_YELLOW "dbg_info:: 'file content':: " CS_RESET CS_BOLD
@@ -631,15 +730,17 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
 
   // log tokenizer outputs
   print_dbg(CS_BOLD CS_YELLOW "dbg_print::tokenizer tokens::\n" CS_RESET);
-  #ifdef DEBUG
+#ifdef DEBUG
   uint toffset = 0L;
-  string token;
+  cstring token;
   print(CS_BOLD "[ " CS_RESET);
-  for (uint i = 0; i < ntokens; i++) {
+  for (uint i = 0; i < ntokens; i++)
+  {
     token = tokens + toffset;
     if (token[0] == pstr)
       print(CS_BOLD CS_UNDERLINE CS_GREEN "%s" CS_RESET ", ", token + 1);
-    else {
+    else
+    {
       if (token[1] == '\n')
         print(CS_BOLD CS_RED "\\n, " CS_RESET);
       else
@@ -648,9 +749,9 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
     toffset += strlen(token) + 1;
   }
   print(CS_BOLD "]\n" CS_RESET);
-  #endif
+#endif
 
-  #ifndef KV_REALLOC
+#ifndef KV_REALLOC
   print_dbg(CS_YELLOW CS_BOLD "dbg_print::tokenizer log::\n" CS_RESET CS_BOLD
                               "   total memory allocated (exc src) : %lu\n"
                               "   total memory used : %lu\n"
@@ -658,7 +759,7 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
                               "   total no of strings : %lu\n"
                               "   total mem of strings : %lu\n" CS_RESET,
             3 * fsize, offset, ntokens, nstrings, mstrings);
-  #else
+#else
   print_dbg(CS_YELLOW CS_BOLD "dbg_print::tokenizer log::\n" CS_RESET CS_BOLD
                               "   total memory allocated : %lu\n"
                               "   total memory used : %lu\n"
@@ -668,29 +769,33 @@ int KvLoadFile(struct KvObj *pobj, const char *path) {
                               "   total mem of strings : %lu\n" CS_RESET,
             4 * fsize + 1, fsize + 1 + offset, fsize + 1 + offset, ntokens,
             nstrings, mstrings);
-  #endif
+#endif
   // recursive parsing
   print_dbg(CS_BOLD CS_YELLOW "dbg_print::parsing tokens::\n" CS_RESET);
-  KvParse(tokens, ntokens, nstrings, mstrings);
 
+  pobj->__buffers[0] = (uchar *)src;
+
+  int status = KvParse(tokens, ntokens, nstrings, mstrings, pobj);
+  if (!status)
+  {
+    free(src);
+    return 0;
+  }
+  return 1;
 ftkn_exit:
   free(src);
   return 0;
 }
 
-// string KvValueGetValueIndex(struct KvValue *pval, ulong index) {
-
-//   #ifdef KV_BOUNDS_CHECK
-//   assert(index <= pval->vcount);
-//   #endif
-
-//   string raddr = pval->values;
-//   for (ulong i = 0L; i < pval->vcount; i++) {
-//     raddr += strlen(raddr) + 1;
-//   }
-//   return raddr;
-// }
-
-// bool KvValueIsObj(struct KvValue *pval) { return pval->obj != NULL; }
-
-// void KvObjFree(KvObj *pobj) {}
+void KvObjFree(struct KvResult *res)
+{
+  uchar *buffer1 = res->__buffers[0];
+  uchar *buffer2 = res->__buffers[1];
+  if (buffer1)
+    free(buffer1);
+  if (buffer2)
+    free(buffer2);
+  res->__buffers[0] = NULL;
+  res->__buffers[1] = NULL;
+  res->obj = NULL;
+}
